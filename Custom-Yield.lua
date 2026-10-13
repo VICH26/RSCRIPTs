@@ -1,11 +1,11 @@
 --[[
     =======================================================
-    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - REWORKED FINAL)
+    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - ULTRA COMPUTE)
     Style: True Black Minimalist / AMOLED Clean UX
-    Features: Move, Waypoint (Continuous WalkTo & Loop TP 0.2s),
-              Player (Search & Safe TP), Visual (Dynamic Fullbright, NoFog, Custom MaxZoom),
-              Util (Anti Gameplay Pause, Instant Prompts, Save Config).
-              Penyimpanan Rapi di Folder 'FEUtilityData/'
+    Features: Move, Waypoint (Pathfinding, Forced TPWalk, Loop TP 0.2s),
+              Player (Live Search & Safe TP), Visual (Dynamic Fullbright,
+              NoFog, Custom MaxZoom), Util (Anti Gameplay Pause, Instant Prompts).
+              Data Storage: Folder 'FEUtilityData/'
     =======================================================
 --]]
 
@@ -21,6 +21,7 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
+local PathfindingService = game:GetService("PathfindingService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -97,6 +98,7 @@ local FreecamCamType = Camera.CameraType
 local Waypoints = {}
 local ActiveWalkToThread = nil
 local ActiveWalkToName = nil
+local ActiveWalkToMode = nil
 local ActiveLoopTPThread = nil
 local ActiveLoopTPName = nil
 
@@ -113,6 +115,11 @@ local DefaultLighting = {
 
 -- Default Anti-Gameplay Pause
 pcall(function() GuiService:SetGameplayPausedNotificationEnabled(false) end)
+
+-- HELPER FORMAT 2 DESIMAL (XX.XX)
+local function fmt2(val)
+    return string.format("%.2f", tonumber(val) or 0)
+end
 
 -- SAFE HYBRID MOVE INPUT CALCULATOR
 local function getMoveInput(hum)
@@ -354,10 +361,10 @@ local VisualTab = createTab("Visual")
 local UtilTab = createTab("Util")
 
 Tabs["Move"].Visible = true
-TabButtons["Move"].BackgroundColor3 = Color3.fromRGB(0, 229, 255)
-TabButtons["Move"].TextColor3 = Color3.fromRGB(0, 0, 0)
+TabButtons["Move"].BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TabButtons["Move"].TextColor3 = Color3.fromRGB(0, 229, 255)
 
--- 3. UI CONTROLS HELPERS (NUMPAD NUMERIC INPUT ONLY)
+-- 3. UI CONTROLS HELPERS (FORCED MOBILE NUMPAD KEYBOARD)
 local function addInputRow(parent, labelText, defaultValue, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -5, 0, 28)
@@ -381,10 +388,11 @@ local function addInputRow(parent, labelText, defaultValue, callback)
     box.Size = UDim2.new(0.24, 0, 0.75, 0)
     box.Position = UDim2.new(0.52, 0, 0.12, 0)
     box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    box.Text = tostring(defaultValue)
+    box.Text = fmt2(defaultValue)
     box.TextColor3 = Color3.fromRGB(255, 255, 255)
     box.Font = Enum.Font.SourceSans
     box.TextSize = 11
+    box.KeyboardType = Enum.KeyboardType.DecimalPad
     box.Parent = frame
     addCorner(box, 3)
 
@@ -463,14 +471,14 @@ local function addActionButton(parent, labelText, color, callback)
     return btn
 end
 
--- 4. TAB 1: MOVEMENT & SERVER DATA FETCH
+-- 4. TAB 1: MOVEMENT & SERVER DATA FETCH (2-DECIMAL FIXED DISPLAY)
 local ServerInfoLbl = Instance.new("TextLabel")
-ServerInfoLbl.Size = UDim2.new(1, -5, 0, 20)
+ServerInfoLbl.Size = UDim2.new(1, -5, 0, 22)
 ServerInfoLbl.BackgroundTransparency = 1
-ServerInfoLbl.Text = "Server Base WS: " .. tostring(BaseWalkSpeed) .. " | JP: " .. tostring(BaseJumpPower)
+ServerInfoLbl.Text = string.format("Base WS: %s | JP: %s | HH: %s | Grav: %s", fmt2(BaseWalkSpeed), fmt2(BaseJumpPower), fmt2(BaseHipHeight), fmt2(BaseGravity))
 ServerInfoLbl.TextColor3 = Color3.fromRGB(0, 229, 255)
 ServerInfoLbl.Font = Enum.Font.SourceSansBold
-ServerInfoLbl.TextSize = 11
+ServerInfoLbl.TextSize = 10
 ServerInfoLbl.Parent = MoveTab
 
 local function updateServerInfo()
@@ -482,7 +490,7 @@ local function updateServerInfo()
         BaseHipHeight = hum.HipHeight
     end
     BaseGravity = workspace.Gravity
-    ServerInfoLbl.Text = "Server Base WS: " .. tostring(BaseWalkSpeed) .. " | JP: " .. tostring(BaseJumpPower)
+    ServerInfoLbl.Text = string.format("Base WS: %s | JP: %s | HH: %s | Grav: %s", fmt2(BaseWalkSpeed), fmt2(BaseJumpPower), fmt2(BaseHipHeight), fmt2(BaseGravity))
 end
 
 addActionButton(MoveTab, "Fetch / Reset Game Default", Color3.fromRGB(15, 30, 45), function()
@@ -665,7 +673,7 @@ Connections.FlyLoop = RunService.RenderStepped:Connect(function()
 end)
 
 Connections.TPWalkLoop = RunService.Heartbeat:Connect(function(delta)
-    if TPWalkEnabled and LocalPlayer.Character then
+    if TPWalkEnabled and LocalPlayer.Character and not ActiveWalkToName then
         local char = LocalPlayer.Character
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum and hum.MoveDirection.Magnitude > 0 then
@@ -728,7 +736,7 @@ Connections.InfJumpLoop = UserInputService.JumpRequest:Connect(function()
     end
 end)
 
--- 5. TAB 2: WAYPOINT (CONTINUOUS RE-TRIGGER WALKTO & LOOP TP 0.2S)
+-- 5. TAB 2: WAYPOINT (PATHFINDING + FORCED TPWALK COMPATIBILITY)
 local WPCreateFrame = Instance.new("Frame")
 WPCreateFrame.Size = UDim2.new(1, -5, 0, 28)
 WPCreateFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
@@ -762,7 +770,7 @@ local renderWaypoints
 
 local function stopAllWaypointActions()
     if CurrentTweenObj then CurrentTweenObj:Cancel() CurrentTweenObj = nil end
-    if ActiveWalkToThread then task.cancel(ActiveWalkToThread) ActiveWalkToThread = nil ActiveWalkToName = nil end
+    if ActiveWalkToThread then task.cancel(ActiveWalkToThread) ActiveWalkToThread = nil ActiveWalkToName = nil ActiveWalkToMode = nil end
     if ActiveLoopTPThread then task.cancel(ActiveLoopTPThread) ActiveLoopTPThread = nil ActiveLoopTPName = nil end
     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         LocalPlayer.Character:FindFirstChildOfClass("Humanoid"):MoveTo(LocalPlayer.Character.HumanoidRootPart.Position)
@@ -806,7 +814,7 @@ renderWaypoints = function()
         addStroke(card, Color3.fromRGB(22, 22, 30), 1)
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(0.24, -2, 1, 0)
+        lbl.Size = UDim2.new(0.2, -2, 1, 0)
         lbl.Position = UDim2.new(0, 4, 0, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = name
@@ -817,8 +825,8 @@ renderWaypoints = function()
         lbl.Parent = card
 
         local btnTP = Instance.new("TextButton")
-        btnTP.Size = UDim2.new(0.12, 0, 0.8, 0)
-        btnTP.Position = UDim2.new(0.25, 0, 0.1, 0)
+        btnTP.Size = UDim2.new(0.1, 0, 0.8, 0)
+        btnTP.Position = UDim2.new(0.21, 0, 0.1, 0)
         btnTP.BackgroundColor3 = Color3.fromRGB(10, 45, 25)
         btnTP.Text = "TP"
         btnTP.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -827,42 +835,42 @@ renderWaypoints = function()
         btnTP.Parent = card
         addCorner(btnTP, 3)
 
-        local btnWalk = Instance.new("TextButton")
-        btnWalk.Size = UDim2.new(0.16, 0, 0.8, 0)
-        btnWalk.Position = UDim2.new(0.38, 0, 0.1, 0)
-        btnWalk.BackgroundColor3 = (ActiveWalkToName == name) and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(15, 35, 55)
-        btnWalk.Text = "WalkTo"
-        btnWalk.TextColor3 = (ActiveWalkToName == name) and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
-        btnWalk.Font = Enum.Font.SourceSansBold
-        btnWalk.TextSize = 9
-        btnWalk.Parent = card
-        addCorner(btnWalk, 3)
+        local btnDirect = Instance.new("TextButton")
+        btnDirect.Size = UDim2.new(0.17, 0, 0.8, 0)
+        btnDirect.Position = UDim2.new(0.32, 0, 0.1, 0)
+        btnDirect.BackgroundColor3 = (ActiveWalkToName == name and ActiveWalkToMode == "Direct") and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(15, 35, 55)
+        btnDirect.Text = "WalkTo"
+        btnDirect.TextColor3 = (ActiveWalkToName == name and ActiveWalkToMode == "Direct") and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+        btnDirect.Font = Enum.Font.SourceSansBold
+        btnDirect.TextSize = 9
+        btnDirect.Parent = card
+        addCorner(btnDirect, 3)
+
+        local btnPath = Instance.new("TextButton")
+        btnPath.Size = UDim2.new(0.18, 0, 0.8, 0)
+        btnPath.Position = UDim2.new(0.50, 0, 0.1, 0)
+        btnPath.BackgroundColor3 = (ActiveWalkToName == name and ActiveWalkToMode == "Path") and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(25, 45, 65)
+        btnPath.Text = "Pathfinding"
+        btnPath.TextColor3 = (ActiveWalkToName == name and ActiveWalkToMode == "Path") and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+        btnPath.Font = Enum.Font.SourceSansBold
+        btnPath.TextSize = 8
+        btnPath.Parent = card
+        addCorner(btnPath, 3)
 
         local btnLoop = Instance.new("TextButton")
-        btnLoop.Size = UDim2.new(0.18, 0, 0.8, 0)
-        btnLoop.Position = UDim2.new(0.55, 0, 0.1, 0)
+        btnLoop.Size = UDim2.new(0.16, 0, 0.8, 0)
+        btnLoop.Position = UDim2.new(0.69, 0, 0.1, 0)
         btnLoop.BackgroundColor3 = (ActiveLoopTPName == name) and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(45, 35, 10)
         btnLoop.Text = "Loop 0.2s"
         btnLoop.TextColor3 = (ActiveLoopTPName == name) and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
         btnLoop.Font = Enum.Font.SourceSansBold
-        btnLoop.TextSize = 9
+        btnLoop.TextSize = 8
         btnLoop.Parent = card
         addCorner(btnLoop, 3)
 
-        local btnTween = Instance.new("TextButton")
-        btnTween.Size = UDim2.new(0.14, 0, 0.8, 0)
-        btnTween.Position = UDim2.new(0.74, 0, 0.1, 0)
-        btnTween.BackgroundColor3 = Color3.fromRGB(45, 15, 45)
-        btnTween.Text = "Tween"
-        btnTween.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btnTween.Font = Enum.Font.SourceSansBold
-        btnTween.TextSize = 9
-        btnTween.Parent = card
-        addCorner(btnTween, 3)
-
         local btnDel = Instance.new("TextButton")
         btnDel.Size = UDim2.new(0.1, 0, 0.8, 0)
-        btnDel.Position = UDim2.new(0.89, 0, 0.1, 0)
+        btnDel.Position = UDim2.new(0.87, 0, 0.1, 0)
         btnDel.BackgroundColor3 = Color3.fromRGB(50, 15, 15)
         btnDel.Text = "✕"
         btnDel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -877,14 +885,15 @@ renderWaypoints = function()
             end
         end)
 
-        -- CONTINUOUS RE-TRIGGER WALKTO (ANTI 8-SECOND TIMEOUT & AUTO-STOP <= 3 STUDS)
-        btnWalk.MouseButton1Click:Connect(function()
-            if ActiveWalkToName == name then
+        -- DIRECT WALKTO WITH TPWALK OVERRIDE
+        btnDirect.MouseButton1Click:Connect(function()
+            if ActiveWalkToName == name and ActiveWalkToMode == "Direct" then
                 stopAllWaypointActions()
                 renderWaypoints()
             else
                 stopAllWaypointActions()
                 ActiveWalkToName = name
+                ActiveWalkToMode = "Direct"
                 ActiveWalkToThread = task.spawn(function()
                     while ActiveWalkToName == name do
                         local char = LocalPlayer.Character
@@ -892,16 +901,92 @@ renderWaypoints = function()
                         local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
                         if hum and hrp then
-                            local dist = (hrp.Position - cf.Position).Magnitude
-                            if dist <= 3 then
+                            local dir = (cf.Position - hrp.Position)
+                            local flatDir = Vector3.new(dir.X, 0, dir.Z)
+                            if flatDir.Magnitude <= 3 then
                                 stopAllWaypointActions()
                                 renderWaypoints()
                                 break
                             end
-                            hum:MoveTo(cf.Position)
+
+                            if TPWalkEnabled then
+                                char:TranslateBy(flatDir.Unit * TPWalkVal * 0.3 * 10)
+                            else
+                                hum:MoveTo(cf.Position)
+                            end
                         end
-                        task.wait(0.3)
+                        task.wait(0.03)
                     end
+                end)
+                renderWaypoints()
+            end
+        end)
+
+        -- PATHFINDING WALKTO WITH SMART NAV & TPWALK OVERRIDE
+        btnPath.MouseButton1Click:Connect(function()
+            if ActiveWalkToName == name and ActiveWalkToMode == "Path" then
+                stopAllWaypointActions()
+                renderWaypoints()
+            else
+                stopAllWaypointActions()
+                ActiveWalkToName = name
+                ActiveWalkToMode = "Path"
+                ActiveWalkToThread = task.spawn(function()
+                    local char = LocalPlayer.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if not (hum and hrp) then return end
+
+                    local path = PathfindingService:CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true})
+                    local success = pcall(function() path:ComputeAsync(hrp.Position, cf.Position) end)
+
+                    if success and path.Status == Enum.PathStatus.Success then
+                        local pathWaypoints = path:GetWaypoints()
+                        for _, wp in ipairs(pathWaypoints) do
+                            if ActiveWalkToName ~= name then break end
+                            if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+
+                            while ActiveWalkToName == name do
+                                char = LocalPlayer.Character
+                                hum = char and char:FindFirstChildOfClass("Humanoid")
+                                hrp = char and char:FindFirstChild("HumanoidRootPart")
+                                if not (hum and hrp) then break end
+
+                                local dir = (wp.Position - hrp.Position)
+                                local flatDir = Vector3.new(dir.X, 0, dir.Z)
+                                if flatDir.Magnitude <= 2.5 then break end
+
+                                if TPWalkEnabled then
+                                    char:TranslateBy(flatDir.Unit * TPWalkVal * 0.03 * 10)
+                                else
+                                    hum:MoveTo(wp.Position)
+                                end
+                                task.wait(0.03)
+                            end
+                        end
+                    else
+                        -- Fallback Direct Walk
+                        while ActiveWalkToName == name do
+                            char = LocalPlayer.Character
+                            hum = char and char:FindFirstChildOfClass("Humanoid")
+                            hrp = char and char:FindFirstChild("HumanoidRootPart")
+                            if not (hum and hrp) then break end
+
+                            local dir = (cf.Position - hrp.Position)
+                            local flatDir = Vector3.new(dir.X, 0, dir.Z)
+                            if flatDir.Magnitude <= 3 then break end
+
+                            if TPWalkEnabled then
+                                char:TranslateBy(flatDir.Unit * TPWalkVal * 0.03 * 10)
+                            else
+                                hum:MoveTo(cf.Position)
+                            end
+                            task.wait(0.03)
+                        end
+                    end
+
+                    stopAllWaypointActions()
+                    renderWaypoints()
                 end)
                 renderWaypoints()
             end
@@ -923,18 +1008,6 @@ renderWaypoints = function()
                     end
                 end)
                 renderWaypoints()
-            end
-        end)
-
-        btnTween.MouseButton1Click:Connect(function()
-            stopAllWaypointActions()
-            local char = LocalPlayer.Character
-            if char and char:FindFirstChild("HumanoidRootPart") then
-                local hrp = char.HumanoidRootPart
-                local dist = (hrp.Position - cf.Position).Magnitude
-                local time = dist / math.max(TweenSpeedVal, 1)
-                CurrentTweenObj = TweenService:Create(hrp, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = cf})
-                CurrentTweenObj:Play()
             end
         end)
 
