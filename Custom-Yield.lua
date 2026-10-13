@@ -1,12 +1,10 @@
 --[[
     =======================================================
-    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - FIXED FLY ENGINE)
+    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - REWORKED FINAL)
     Style: True Black Minimalist / AMOLED Clean UX
-    Features: 30+ Utilities, Ultra-Low Latency Aimbot Engine,
-              Dynamic Proximity Prompts, Dynamic Fullbright & NoFog,
-              Mobile Fly (Hybrid MoveDirection + ControlModule),
-              TPWalk (TranslateBy), WallTP (Touch Auto-Climb),
-              Dynamic Chams, Per-Game Config & Resizable Window
+    Features: Move, Waypoint (WalkTo & Loop TP 0.2s), Player (Search & Safe TP),
+              Visual (Dynamic Fullbright, NoFog, Custom MaxZoom), Util.
+              Penyimpanan Rapi di Folder 'FEUtilityData/'
     =======================================================
 --]]
 
@@ -26,10 +24,18 @@ local GuiService = game:GetService("GuiService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
+-- SYSTEM FOLDER SETUP
+local FolderName = "FEUtilityData"
+if makefolder and isfolder and not isfolder(FolderName) then
+    pcall(function() makefolder(FolderName) end)
+end
+
+local WaypointFileName = FolderName .. "/Waypoints_" .. tostring(game.PlaceId) .. ".json"
+local ConfigFileName = FolderName .. "/Config_" .. tostring(game.PlaceId) .. ".json"
+
 -- Global Storage
 local Connections = {}
 local ESPLabels = {}
-local NPCCache = {}
 local FullbrightConns = {}
 local NoFogConns = {}
 local InstantPromptConn = nil
@@ -38,35 +44,21 @@ local ControlModule = nil
 local currentChar = LocalPlayer.Character
 local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
 
--- Feature Variables & Defaults
-local WalkSpeedVal = currentHum and currentHum.WalkSpeed or 16
+-- Server Base Data & Flags
+local BaseWalkSpeed = currentHum and currentHum.WalkSpeed or 16
+local BaseJumpPower = currentHum and (currentHum.UseJumpPower and currentHum.JumpPower or 50) or 50
+local BaseGravity = workspace.Gravity
+local BaseHipHeight = currentHum and currentHum.HipHeight or 0
+
+local WalkSpeedVal = BaseWalkSpeed
 local TPWalkVal = 1
-local JumpPowerVal = currentHum and (currentHum.UseJumpPower and currentHum.JumpPower or 50) or 50
-local HipHeightVal = currentHum and currentHum.HipHeight or 0
-local GravityVal = workspace.Gravity
+local JumpPowerVal = BaseJumpPower
+local HipHeightVal = BaseHipHeight
+local GravityVal = BaseGravity
 local FlySpeedVal = 50
 local VehicleSpeedVal = 100
 local TweenSpeedVal = 100
-local PromptRadiusVal = 10
-
--- Combat & Aimbot Variables
-local AimbotEnabled = false
-local AimbotTargetMode = "Enemies" -- "Enemies", "All Players", "NPCs", "All"
-local AimbotTargetPart = "Head" -- "Head", "HumanoidRootPart"
-local IgnoreTeams = true
-local WallCheck = true
-local ShowFOVCircle = true
-local FOVRadiusVal = 60
-local SmoothnessVal = 2
-local VelocityPredictionEnabled = false
-local PredictionScaleVal = 1.0
-
-local KillAuraEnabled = false
-local KillAuraRadius = 50
-local KillAuraDelay = 0.1
-local KillAuraTargetMode = "NPCs"
-local WeaponReachEnabled = false
-local WeaponReachSize = 15
+local CustomMaxZoomVal = 128
 
 -- Movement Flags
 local WalkSpeedEnabled = false
@@ -74,7 +66,6 @@ local TPWalkEnabled = false
 local WallTPEnabled = false
 local WallTPConn = nil
 local FlyEnabled = false
-local FloatEnabled = false
 local InfJumpEnabled = false
 local NoclipEnabled = false
 local AirwalkEnabled = false
@@ -85,17 +76,13 @@ local ChamsEnabled = false
 local DistanceESPEnabled = false
 local FullbrightEnabled = false
 local NoFogEnabled = false
-local MaxZoomEnabled = false
 local NoclipCamEnabled = false
 local FreecamEnabled = false
 
 -- Utility Flags
 local AntiAFKEnabled = true
 local InstantPromptEnabled = false
-local AutoPromptEnabled = false
-local AntiGameplayPauseEnabled = false
-local AntiKnockbackEnabled = false
-local AntiRagdollEnabled = false
+local AntiGameplayPauseEnabled = true -- Default ON
 local AntiAnchoredEnabled = false
 local HeadsitEnabled = false
 local SpectateEnabled = false
@@ -103,15 +90,16 @@ local SpectateEnabled = false
 local SelectedPlayer = nil
 local CurrentTweenObj = nil
 local AirwalkPart = nil
+local AirwalkY = nil
 local FreecamCamType = Camera.CameraType
 
 local Waypoints = {}
-local WaypointFileName = "Waypoints_" .. tostring(game.PlaceId) .. ".json"
-local ConfigFileName = "Config_FEUtility_" .. tostring(game.PlaceId) .. ".json"
+local ActiveWalkToThread = nil
+local ActiveLoopTPThread = nil
+local ActiveLoopTPName = nil
 
 local FlyVelocityName = "FEFlyVelocity"
 local FlyGyroName = "FEFlyGyro"
-local FloatBV, FloatBG
 
 local DefaultLighting = {
     Brightness = game.Lighting.Brightness,
@@ -121,25 +109,12 @@ local DefaultLighting = {
     OutdoorAmbient = game.Lighting.OutdoorAmbient
 }
 
--- Drawing API FOV Circle
-local FOVCircle = nil
-pcall(function()
-    if Drawing and Drawing.new then
-        FOVCircle = Drawing.new("Circle")
-        FOVCircle.Thickness = 1.5
-        FOVCircle.Color = Color3.fromRGB(0, 229, 255)
-        FOVCircle.Filled = false
-        FOVCircle.Transparency = 0.7
-        FOVCircle.Radius = FOVRadiusVal
-        FOVCircle.Visible = false
-    end
-end)
+-- Default Anti-Gameplay Pause
+pcall(function() GuiService:SetGameplayPausedNotificationEnabled(false) end)
 
--- SAFE HYBRID MOVE INPUT CALCULATOR (PREVENTS STUCK FLY BUG)
+-- SAFE HYBRID MOVE INPUT CALCULATOR
 local function getMoveInput(hum)
     local moveVector = Vector3.zero
-
-    -- 1. Coba ambil dari ControlModule jika ada
     if not ControlModule then
         pcall(function()
             local ps = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -153,7 +128,6 @@ local function getMoveInput(hum)
         pcall(function() moveVector = ControlModule:GetMoveVector() end)
     end
 
-    -- 2. Fallback Universal via Humanoid.MoveDirection jika ControlModule tidak memberikan nilai
     if moveVector.Magnitude == 0 and hum and hum.MoveDirection.Magnitude > 0 then
         local camCF = Camera.CFrame
         local flatLook = (camCF.LookVector * Vector3.new(1, 0, 1)).Unit
@@ -162,21 +136,14 @@ local function getMoveInput(hum)
         local rightDot = hum.MoveDirection:Dot(flatRight)
         moveVector = Vector3.new(rightDot, 0, -forwardDot)
     end
-
     return moveVector
 end
 
 -- MULTI-LAYERED TEAM DETECTION
 local function isTeammate(targetPlayer)
     if not targetPlayer or targetPlayer == LocalPlayer then return true end
-
-    if LocalPlayer.Team and targetPlayer.Team then
-        if LocalPlayer.Team == targetPlayer.Team then return true end
-    end
-
-    if LocalPlayer.TeamColor and targetPlayer.TeamColor then
-        if LocalPlayer.TeamColor == targetPlayer.TeamColor then return true end
-    end
+    if LocalPlayer.Team and targetPlayer.Team and LocalPlayer.Team == targetPlayer.Team then return true end
+    if LocalPlayer.TeamColor and targetPlayer.TeamColor and LocalPlayer.TeamColor == targetPlayer.TeamColor then return true end
 
     local lpTeamAttr = LocalPlayer:GetAttribute("Team") or (LocalPlayer.Character and LocalPlayer.Character:GetAttribute("Team"))
     local tpTeamAttr = targetPlayer:GetAttribute("Team") or (targetPlayer.Character and targetPlayer.Character:GetAttribute("Team"))
@@ -188,38 +155,6 @@ local function isTeammate(targetPlayer)
 
     return false
 end
-
--- BACKGROUND NPC SCANNER (OPTIMIZED RUNS ONCE PER SECOND)
-task.spawn(function()
-    while true do
-        if AimbotEnabled or KillAuraEnabled then
-            local newCache = {}
-            local myChar = LocalPlayer.Character
-
-            local function scanContainer(parent)
-                for _, obj in pairs(parent:GetChildren()) do
-                    if obj:IsA("Model") and obj ~= myChar and not Players:GetPlayerFromCharacter(obj) then
-                        if obj:FindFirstChildOfClass("Humanoid") and (obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("Head")) then
-                            table.insert(newCache, obj)
-                        end
-                    elseif obj:IsA("Folder") or (obj:IsA("Model") and not obj:FindFirstChildOfClass("Humanoid")) then
-                        for _, subObj in pairs(obj:GetChildren()) do
-                            if subObj:IsA("Model") and subObj ~= myChar and not Players:GetPlayerFromCharacter(subObj) then
-                                if subObj:FindFirstChildOfClass("Humanoid") and (subObj:FindFirstChild("HumanoidRootPart") or subObj:FindFirstChild("Head")) then
-                                    table.insert(newCache, subObj)
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
-            scanContainer(workspace)
-            NPCCache = newCache
-        end
-        task.wait(1)
-    end
-end)
 
 -- 2. GUI BASE CREATION (TRUE BLACK AMOLED TONE)
 local TargetGuiParent = (gethui and gethui()) or game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
@@ -370,7 +305,7 @@ local TabButtons = {}
 
 local function createTab(name)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 58, 1, 0)
+    btn.Size = UDim2.new(0, 64, 1, 0)
     btn.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
     btn.Text = name
     btn.TextColor3 = Color3.fromRGB(150, 150, 160)
@@ -411,7 +346,6 @@ local function createTab(name)
 end
 
 local MoveTab = createTab("Move")
-local CombatTab = createTab("Combat")
 local WPTab = createTab("Waypoint")
 local PlayerTab = createTab("Player")
 local VisualTab = createTab("Visual")
@@ -421,7 +355,7 @@ Tabs["Move"].Visible = true
 TabButtons["Move"].BackgroundColor3 = Color3.fromRGB(0, 229, 255)
 TabButtons["Move"].TextColor3 = Color3.fromRGB(0, 0, 0)
 
--- 3. UI CONTROLS HELPERS
+-- 3. UI CONTROLS HELPERS (NUMPAD NUMERIC INPUT ONLY)
 local function addInputRow(parent, labelText, defaultValue, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -5, 0, 28)
@@ -452,6 +386,11 @@ local function addInputRow(parent, labelText, defaultValue, callback)
     box.Parent = frame
     addCorner(box, 3)
 
+    -- Filter Numpad/Angka
+    box:GetPropertyChangedSignal("Text"):Connect(function()
+        box.Text = string.gsub(box.Text, "[^%d%.]", "")
+    end)
+
     local applyBtn = Instance.new("TextButton")
     applyBtn.Size = UDim2.new(0.2, -6, 0.75, 0)
     applyBtn.Position = UDim2.new(0.78, 0, 0.12, 0)
@@ -469,81 +408,6 @@ local function addInputRow(parent, labelText, defaultValue, callback)
     end)
 
     return frame, box
-end
-
-local function addSliderInput(parent, labelText, minVal, maxVal, defaultVal, callback)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, -5, 0, 38)
-    frame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
-    frame.Parent = parent
-    addCorner(frame, 4)
-    addStroke(frame, Color3.fromRGB(22, 22, 30), 1)
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.6, -5, 0, 18)
-    lbl.Position = UDim2.new(0, 6, 0, 2)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = labelText
-    lbl.TextColor3 = Color3.fromRGB(200, 200, 210)
-    lbl.Font = Enum.Font.SourceSans
-    lbl.TextSize = 11
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = frame
-
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(0.32, -5, 0, 16)
-    box.Position = UDim2.new(0.68, 0, 0, 3)
-    box.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    box.Text = tostring(defaultVal)
-    box.TextColor3 = Color3.fromRGB(255, 255, 255)
-    box.Font = Enum.Font.SourceSans
-    box.TextSize = 11
-    box.Parent = frame
-    addCorner(box, 3)
-
-    local sliderBg = Instance.new("Frame")
-    sliderBg.Size = UDim2.new(1, -12, 0, 6)
-    sliderBg.Position = UDim2.new(0, 6, 0, 24)
-    sliderBg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    sliderBg.Parent = frame
-    addCorner(sliderBg, 3)
-
-    local sliderFill = Instance.new("Frame")
-    local initialPercent = math.clamp((defaultVal - minVal) / (maxVal - minVal), 0, 1)
-    sliderFill.Size = UDim2.new(initialPercent, 0, 1, 0)
-    sliderFill.BackgroundColor3 = Color3.fromRGB(0, 229, 255)
-    sliderFill.Parent = sliderBg
-    addCorner(sliderFill, 3)
-
-    local isDragging = false
-    local function updateSlider(inputPos)
-        local scale = math.clamp((inputPos.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
-        sliderFill.Size = UDim2.new(scale, 0, 1, 0)
-        local val = math.floor((minVal + (maxVal - minVal) * scale) * 100 + 0.5) / 100
-        box.Text = tostring(val)
-        callback(val)
-    end
-
-    sliderBg.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            isDragging = true
-            updateSlider(input.Position)
-        end
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-        if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            updateSlider(input.Position)
-        end
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            isDragging = false
-        end
-    end)
-
-    return frame
 end
 
 local function addToggle(parent, labelText, defaultState, callback)
@@ -598,7 +462,40 @@ local function addActionButton(parent, labelText, color, callback)
     return btn
 end
 
--- 4. TAB 1: MOVEMENT
+-- 4. TAB 1: MOVEMENT & SERVER DATA FETCH
+local ServerInfoLbl = Instance.new("TextLabel")
+ServerInfoLbl.Size = UDim2.new(1, -5, 0, 20)
+ServerInfoLbl.BackgroundTransparency = 1
+ServerInfoLbl.Text = "Server Base WS: " .. tostring(BaseWalkSpeed) .. " | JP: " .. tostring(BaseJumpPower)
+ServerInfoLbl.TextColor3 = Color3.fromRGB(0, 229, 255)
+ServerInfoLbl.Font = Enum.Font.SourceSansBold
+ServerInfoLbl.TextSize = 11
+ServerInfoLbl.Parent = MoveTab
+
+-- Dynamic Listener Server Data Update
+local function updateServerInfo()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if not WalkSpeedEnabled then BaseWalkSpeed = hum.WalkSpeed end
+        if hum.UseJumpPower then BaseJumpPower = hum.JumpPower end
+        BaseHipHeight = hum.HipHeight
+    end
+    BaseGravity = workspace.Gravity
+    ServerInfoLbl.Text = "Server Base WS: " .. tostring(BaseWalkSpeed) .. " | JP: " .. tostring(BaseJumpPower)
+end
+
+addActionButton(MoveTab, "Fetch / Reset Game Default", Color3.fromRGB(15, 30, 45), function()
+    updateServerInfo()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+        local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        hum.WalkSpeed = BaseWalkSpeed
+        hum.JumpPower = BaseJumpPower
+        hum.HipHeight = BaseHipHeight
+    end
+    workspace.Gravity = BaseGravity
+end)
+
 addInputRow(MoveTab, "WalkSpeed Value", WalkSpeedVal, function(v)
     WalkSpeedVal = v
     if not WalkSpeedEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
@@ -638,10 +535,7 @@ local function enableWallTP()
 end
 
 local function disableWallTP()
-    if WallTPConn then
-        WallTPConn:Disconnect()
-        WallTPConn = nil
-    end
+    if WallTPConn then WallTPConn:Disconnect() WallTPConn = nil end
 end
 
 addToggle(MoveTab, "WallTP (Touch Auto-Climb)", false, function(state)
@@ -651,6 +545,7 @@ end)
 
 Connections.WallTPCharAdded = LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
+    updateServerInfo()
     if WallTPEnabled then enableWallTP() end
 end)
 
@@ -727,33 +622,11 @@ addToggle(MoveTab, "Mobile Fly (ControlModule)", false, function(state)
     if FlyEnabled then startFly() else stopFly() end
 end)
 
-addToggle(MoveTab, "Float", false, function(state)
-    FloatEnabled = state
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-    local hrp = char.HumanoidRootPart
-
-    if FloatEnabled then
-        FloatBV = Instance.new("BodyVelocity")
-        FloatBV.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-        FloatBV.Velocity = Vector3.zero
-        FloatBV.Parent = hrp
-
-        FloatBG = Instance.new("BodyGyro")
-        FloatBG.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
-        FloatBG.CFrame = hrp.CFrame
-        FloatBG.Parent = hrp
-    else
-        if FloatBV then FloatBV:Destroy() end
-        if FloatBG then FloatBG:Destroy() end
-    end
-end)
-
-addToggle(MoveTab, "Airwalk (Invisible Floor)", false, function(state)
+addToggle(MoveTab, "Airwalk (Locked Y Floor)", false, function(state)
     AirwalkEnabled = state
-    if not state and AirwalkPart then
-        AirwalkPart:Destroy()
-        AirwalkPart = nil
+    if not state then
+        AirwalkY = nil
+        if AirwalkPart then AirwalkPart:Destroy() AirwalkPart = nil end
     end
 end)
 
@@ -761,149 +634,7 @@ addToggle(MoveTab, "Noclip Vehicle", false, function(state) NoclipVehicleEnabled
 addToggle(MoveTab, "Infinite Jump", false, function(state) InfJumpEnabled = state end)
 addToggle(MoveTab, "Noclip", false, function(state) NoclipEnabled = state end)
 
--- 5. TAB 2: COMBAT (AIMBOT, KILL AURA, WEAPON REACH)
-addToggle(CombatTab, "Aimbot Target Lock", false, function(state) AimbotEnabled = state end)
-
-local AimTargetBtn = addActionButton(CombatTab, "Aimbot Mode: " .. AimbotTargetMode, Color3.fromRGB(20, 20, 30), function()
-    if AimbotTargetMode == "Enemies" then AimbotTargetMode = "All Players"
-    elseif AimbotTargetMode == "All Players" then AimbotTargetMode = "NPCs"
-    elseif AimbotTargetMode == "NPCs" then AimbotTargetMode = "All"
-    else AimbotTargetMode = "Enemies" end
-end)
-AimTargetBtn.MouseButton1Click:Connect(function() AimTargetBtn.Text = "Aimbot Mode: " .. AimbotTargetMode end)
-
-local AimPartBtn = addActionButton(CombatTab, "Aim Part: " .. AimbotTargetPart, Color3.fromRGB(20, 20, 30), function()
-    if AimbotTargetPart == "Head" then AimbotTargetPart = "HumanoidRootPart"
-    else AimbotTargetPart = "Head" end
-end)
-AimPartBtn.MouseButton1Click:Connect(function() AimPartBtn.Text = "Aim Part: " .. AimbotTargetPart end)
-
-addToggle(CombatTab, "Ignore Teams", true, function(state) IgnoreTeams = state end)
-addToggle(CombatTab, "Wall Check (Raycast)", true, function(state) WallCheck = state end)
-addToggle(CombatTab, "Show FOV Circle", true, function(state)
-    ShowFOVCircle = state
-    if FOVCircle then FOVCircle.Visible = state end
-end)
-
-addSliderInput(CombatTab, "FOV Circle Radius", 0, 180, FOVRadiusVal, function(val)
-    FOVRadiusVal = val
-    if FOVCircle then FOVCircle.Radius = val end
-end)
-
-addSliderInput(CombatTab, "Aimbot Smoothness", 0, 10, SmoothnessVal, function(val) SmoothnessVal = val end)
-addToggle(CombatTab, "Velocity Prediction", false, function(state) VelocityPredictionEnabled = state end)
-addSliderInput(CombatTab, "Prediction Scale", 0.1, 2.0, PredictionScaleVal, function(val) PredictionScaleVal = val end)
-
-addToggle(CombatTab, "Kill Aura", false, function(state) KillAuraEnabled = state end)
-
-local TargetModeBtn = addActionButton(CombatTab, "Aura Target Mode: " .. KillAuraTargetMode, Color3.fromRGB(20, 20, 30), function()
-    if KillAuraTargetMode == "NPCs" then KillAuraTargetMode = "Players"
-    elseif KillAuraTargetMode == "Players" then KillAuraTargetMode = "All"
-    else KillAuraTargetMode = "NPCs" end
-end)
-TargetModeBtn.MouseButton1Click:Connect(function() TargetModeBtn.Text = "Aura Target Mode: " .. KillAuraTargetMode end)
-
-addSliderInput(CombatTab, "Aura Radius (Studs)", 1, 200, KillAuraRadius, function(val) KillAuraRadius = val end)
-addSliderInput(CombatTab, "Attack Delay (Sec)", 0.05, 2, KillAuraDelay, function(val) KillAuraDelay = val end)
-
-addToggle(CombatTab, "Weapon Reach (Hitbox Expander)", false, function(state) WeaponReachEnabled = state end)
-addInputRow(CombatTab, "Reach Hitbox Size", WeaponReachSize, function(v) WeaponReachSize = v end)
-
--- ULTRA OPTIMIZED AIMBOT ENGINE
-local function getClosestAimbotTarget()
-    local char = LocalPlayer.Character
-    if not char then return nil end
-
-    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-    local candidateModels = {}
-
-    if AimbotTargetMode == "Enemies" or AimbotTargetMode == "All Players" or AimbotTargetMode == "All" then
-        for _, plr in pairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and plr.Character then
-                local isEnemy = not isTeammate(plr)
-                if (AimbotTargetMode == "All Players") or (AimbotTargetMode == "All") or (AimbotTargetMode == "Enemies" and (not IgnoreTeams or isEnemy)) then
-                    table.insert(candidateModels, plr.Character)
-                end
-            end
-        end
-    end
-
-    if AimbotTargetMode == "NPCs" or AimbotTargetMode == "All" then
-        for _, npcModel in pairs(NPCCache) do
-            table.insert(candidateModels, npcModel)
-        end
-    end
-
-    local validCandidates = {}
-    for _, model in pairs(candidateModels) do
-        local hum = model:FindFirstChildOfClass("Humanoid")
-        local targetPart = model:FindFirstChild(AimbotTargetPart) or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Head")
-
-        if hum and hum.Health > 0 and targetPart then
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-            if onScreen then
-                local dist2D = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                if dist2D <= FOVRadiusVal then
-                    table.insert(validCandidates, {Part = targetPart, Model = model, Dist = dist2D})
-                end
-            end
-        end
-    end
-
-    if #validCandidates == 0 then return nil end
-
-    table.sort(validCandidates, function(a, b) return a.Dist < b.Dist end)
-
-    if not WallCheck then return validCandidates[1].Part end
-
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-
-    for _, cand in ipairs(validCandidates) do
-        rayParams.FilterAncestorsInstances = {char, cand.Model}
-        local origin = Camera.CFrame.Position
-        local dir = cand.Part.Position - origin
-        local hit = workspace:Raycast(origin, dir, rayParams)
-
-        if not hit or not hit.Instance then
-            return cand.Part
-        end
-    end
-
-    return nil
-end
-
-Connections.AimbotLoop = RunService.RenderStepped:Connect(function()
-    if FOVCircle then
-        FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-        FOVCircle.Visible = AimbotEnabled and ShowFOVCircle
-        FOVCircle.Radius = FOVRadiusVal
-    end
-
-    if AimbotEnabled then
-        local targetPart = getClosestAimbotTarget()
-        if targetPart then
-            local targetPos = targetPart.Position
-
-            if VelocityPredictionEnabled and targetPart.Parent:FindFirstChild("HumanoidRootPart") then
-                local hrp = targetPart.Parent.HumanoidRootPart
-                local dist = (Camera.CFrame.Position - targetPos).Magnitude
-                local timeToTarget = dist / 1000
-                targetPos = targetPos + (hrp.AssemblyLinearVelocity * timeToTarget * PredictionScaleVal)
-            end
-
-            local targetCF = CFrame.new(Camera.CFrame.Position, targetPos)
-            if SmoothnessVal > 0 then
-                local lerpFactor = math.clamp(1 / (SmoothnessVal * 2), 0.05, 1)
-                Camera.CFrame = Camera.CFrame:Lerp(targetCF, lerpFactor)
-            else
-                Camera.CFrame = targetCF
-            end
-        end
-    end
-end)
-
--- Mobile Fly & Movement Loops (FIXED HYBRID FLY LOOP)
+-- Movement Loops
 Connections.FlyLoop = RunService.RenderStepped:Connect(function()
     if FlyEnabled then
         local char = LocalPlayer.Character
@@ -922,16 +653,10 @@ Connections.FlyLoop = RunService.RenderStepped:Connect(function()
                 if bv and bg then
                     hum.PlatformStand = true
                     bg.CFrame = Camera.CFrame
-
                     local moveVector = getMoveInput(hum)
-
                     local vel = Vector3.zero
-                    if moveVector.X ~= 0 then
-                        vel = vel + Camera.CFrame.RightVector * (moveVector.X * FlySpeedVal * 2.5)
-                    end
-                    if moveVector.Z ~= 0 then
-                        vel = vel - Camera.CFrame.LookVector * (moveVector.Z * FlySpeedVal * 2.5)
-                    end
+                    if moveVector.X ~= 0 then vel = vel + Camera.CFrame.RightVector * (moveVector.X * FlySpeedVal * 2.5) end
+                    if moveVector.Z ~= 0 then vel = vel - Camera.CFrame.LookVector * (moveVector.Z * FlySpeedVal * 2.5) end
                     bv.Velocity = vel
                 end
             end
@@ -945,70 +670,6 @@ Connections.TPWalkLoop = RunService.Heartbeat:Connect(function(delta)
         local hum = char:FindFirstChildOfClass("Humanoid")
         if hum and hum.MoveDirection.Magnitude > 0 then
             char:TranslateBy(hum.MoveDirection * TPWalkVal * delta * 10)
-        end
-    end
-end)
-
--- Kill Aura & Reach Loops
-task.spawn(function()
-    while true do
-        if KillAuraEnabled then
-            pcall(function()
-                local char = LocalPlayer.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                local tool = char and char:FindFirstChildOfClass("Tool")
-
-                if hrp and tool then
-                    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildOfClass("BasePart")
-
-                    local targets = {}
-                    if KillAuraTargetMode == "Players" or KillAuraTargetMode == "All" then
-                        for _, plr in pairs(Players:GetPlayers()) do
-                            if plr ~= LocalPlayer and plr.Character then table.insert(targets, plr.Character) end
-                        end
-                    end
-                    if KillAuraTargetMode == "NPCs" or KillAuraTargetMode == "All" then
-                        for _, npc in pairs(NPCCache) do table.insert(targets, npc) end
-                    end
-
-                    for _, obj in pairs(targets) do
-                        local targetHum = obj:FindFirstChildOfClass("Humanoid")
-                        local targetPart = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("Torso") or obj:FindFirstChild("Head")
-
-                        if targetHum and targetHum.Health > 0 and targetPart then
-                            local dist = (hrp.Position - targetPart.Position).Magnitude
-                            if dist <= KillAuraRadius then
-                                local targetPlr = Players:GetPlayerFromCharacter(obj)
-                                local isEnemy = not isTeammate(targetPlr)
-                                local validTarget = (KillAuraTargetMode == "All") or (KillAuraTargetMode == "NPCs" and not targetPlr) or (KillAuraTargetMode == "Players" and targetPlr and (not IgnoreTeams or isEnemy))
-
-                                if validTarget then
-                                    tool:Activate()
-                                    if handle and firetouchinterest then
-                                        firetouchinterest(handle, targetPart, 0)
-                                        firetouchinterest(handle, targetPart, 1)
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-        task.wait(KillAuraDelay)
-    end
-end)
-
-Connections.WeaponReachLoop = RunService.RenderStepped:Connect(function()
-    if WeaponReachEnabled and LocalPlayer.Character then
-        local tool = LocalPlayer.Character:FindFirstChildOfClass("Tool")
-        if tool then
-            local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildOfClass("BasePart")
-            if handle then
-                handle.Size = Vector3.new(WeaponReachSize, WeaponReachSize, WeaponReachSize)
-                handle.Transparency = 0.7
-                handle.Massless = true
-            end
         end
     end
 end)
@@ -1034,9 +695,13 @@ Connections.VehicleBoostLoop = RunService.Heartbeat:Connect(function()
     end
 end)
 
+-- FIXED AIRWALK ENGINE (KUNCI ELEVASI Y AGAR TIDAK TERBANG TERUS)
 Connections.AirwalkLoop = RunService.RenderStepped:Connect(function()
     if AirwalkEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         local hrp = LocalPlayer.Character.HumanoidRootPart
+        if not AirwalkY then
+            AirwalkY = hrp.Position.Y - 3.5
+        end
         if not AirwalkPart or not AirwalkPart.Parent then
             AirwalkPart = Instance.new("Part")
             AirwalkPart.Size = Vector3.new(6, 1, 6)
@@ -1045,7 +710,7 @@ Connections.AirwalkLoop = RunService.RenderStepped:Connect(function()
             AirwalkPart.CanCollide = true
             AirwalkPart.Parent = workspace
         end
-        AirwalkPart.CFrame = CFrame.new(hrp.Position.X, hrp.Position.Y - 3.5, hrp.Position.Z)
+        AirwalkPart.CFrame = CFrame.new(hrp.Position.X, AirwalkY, hrp.Position.Z)
     end
 end)
 
@@ -1064,7 +729,7 @@ Connections.InfJumpLoop = UserInputService.JumpRequest:Connect(function()
     end
 end)
 
--- 6. TAB 3: WAYPOINT
+-- 5. TAB 2: WAYPOINT (WALKTO & LOOP TP 0.2S)
 local WPCreateFrame = Instance.new("Frame")
 WPCreateFrame.Size = UDim2.new(1, -5, 0, 28)
 WPCreateFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
@@ -1094,13 +759,16 @@ WPAddBtn.TextSize = 11
 WPAddBtn.Parent = WPCreateFrame
 addCorner(WPAddBtn, 3)
 
-addActionButton(WPTab, "Cancel Active Tween", Color3.fromRGB(50, 20, 20), function()
-    if CurrentTweenObj then
-        CurrentTweenObj:Cancel()
-        CurrentTweenObj = nil
+local function stopAllWaypointActions()
+    if CurrentTweenObj then CurrentTweenObj:Cancel() CurrentTweenObj = nil end
+    if ActiveWalkToThread then task.cancel(ActiveWalkToThread) ActiveWalkToThread = nil end
+    if ActiveLoopTPThread then task.cancel(ActiveLoopTPThread) ActiveLoopTPThread = nil ActiveLoopTPName = nil end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        LocalPlayer.Character:FindFirstChildOfClass("Humanoid"):MoveTo(LocalPlayer.Character.HumanoidRootPart.Position)
     end
-end)
+end
 
+addActionButton(WPTab, "Cancel All Active Actions (Tween/WalkTo/Loop)", Color3.fromRGB(60, 20, 20), stopAllWaypointActions)
 addInputRow(WPTab, "Tween Speed", TweenSpeedVal, function(v) TweenSpeedVal = v end)
 
 local WPListFrame = Instance.new("Frame")
@@ -1126,53 +794,75 @@ local function renderWaypoints()
     for _, child in pairs(WPListFrame:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
     for name, cf in pairs(Waypoints) do
         local card = Instance.new("Frame")
-        card.Size = UDim2.new(1, 0, 0, 28)
+        card.Size = UDim2.new(1, 0, 0, 30)
         card.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
         card.Parent = WPListFrame
         addCorner(card, 4)
         addStroke(card, Color3.fromRGB(22, 22, 30), 1)
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(0.35, -5, 1, 0)
-        lbl.Position = UDim2.new(0, 5, 0, 0)
+        lbl.Size = UDim2.new(0.24, -2, 1, 0)
+        lbl.Position = UDim2.new(0, 4, 0, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = name
         lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
         lbl.Font = Enum.Font.SourceSansBold
-        lbl.TextSize = 11
+        lbl.TextSize = 10
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = card
 
         local btnTP = Instance.new("TextButton")
-        btnTP.Size = UDim2.new(0.18, 0, 0.8, 0)
-        btnTP.Position = UDim2.new(0.36, 0, 0.1, 0)
+        btnTP.Size = UDim2.new(0.12, 0, 0.8, 0)
+        btnTP.Position = UDim2.new(0.25, 0, 0.1, 0)
         btnTP.BackgroundColor3 = Color3.fromRGB(10, 45, 25)
         btnTP.Text = "TP"
         btnTP.TextColor3 = Color3.fromRGB(255, 255, 255)
         btnTP.Font = Enum.Font.SourceSansBold
-        btnTP.TextSize = 10
+        btnTP.TextSize = 9
         btnTP.Parent = card
         addCorner(btnTP, 3)
 
+        local btnWalk = Instance.new("TextButton")
+        btnWalk.Size = UDim2.new(0.16, 0, 0.8, 0)
+        btnWalk.Position = UDim2.new(0.38, 0, 0.1, 0)
+        btnWalk.BackgroundColor3 = Color3.fromRGB(15, 35, 55)
+        btnWalk.Text = "WalkTo"
+        btnWalk.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btnWalk.Font = Enum.Font.SourceSansBold
+        btnWalk.TextSize = 9
+        btnWalk.Parent = card
+        addCorner(btnWalk, 3)
+
+        local btnLoop = Instance.new("TextButton")
+        btnLoop.Size = UDim2.new(0.18, 0, 0.8, 0)
+        btnLoop.Position = UDim2.new(0.55, 0, 0.1, 0)
+        btnLoop.BackgroundColor3 = (ActiveLoopTPName == name) and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(45, 35, 10)
+        btnLoop.Text = "Loop 0.2s"
+        btnLoop.TextColor3 = (ActiveLoopTPName == name) and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+        btnLoop.Font = Enum.Font.SourceSansBold
+        btnLoop.TextSize = 9
+        btnLoop.Parent = card
+        addCorner(btnLoop, 3)
+
         local btnTween = Instance.new("TextButton")
-        btnTween.Size = UDim2.new(0.2, 0, 0.8, 0)
-        btnTween.Position = UDim2.new(0.55, 0, 0.1, 0)
-        btnTween.BackgroundColor3 = Color3.fromRGB(50, 35, 10)
+        btnTween.Size = UDim2.new(0.14, 0, 0.8, 0)
+        btnTween.Position = UDim2.new(0.74, 0, 0.1, 0)
+        btnTween.BackgroundColor3 = Color3.fromRGB(45, 15, 45)
         btnTween.Text = "Tween"
         btnTween.TextColor3 = Color3.fromRGB(255, 255, 255)
         btnTween.Font = Enum.Font.SourceSansBold
-        btnTween.TextSize = 10
+        btnTween.TextSize = 9
         btnTween.Parent = card
         addCorner(btnTween, 3)
 
         local btnDel = Instance.new("TextButton")
-        btnDel.Size = UDim2.new(0.18, 0, 0.8, 0)
-        btnDel.Position = UDim2.new(0.76, 0, 0.1, 0)
+        btnDel.Size = UDim2.new(0.1, 0, 0.8, 0)
+        btnDel.Position = UDim2.new(0.89, 0, 0.1, 0)
         btnDel.BackgroundColor3 = Color3.fromRGB(50, 15, 15)
-        btnDel.Text = "Del"
+        btnDel.Text = "✕"
         btnDel.TextColor3 = Color3.fromRGB(255, 255, 255)
         btnDel.Font = Enum.Font.SourceSansBold
-        btnDel.TextSize = 10
+        btnDel.TextSize = 9
         btnDel.Parent = card
         addCorner(btnDel, 3)
 
@@ -1182,19 +872,51 @@ local function renderWaypoints()
             end
         end)
 
+        btnWalk.MouseButton1Click:Connect(function()
+            stopAllWaypointActions()
+            ActiveWalkToThread = task.spawn(function()
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum:MoveTo(cf.Position)
+                    hum.MoveToFinished:Wait()
+                end
+            end)
+        end)
+
+        btnLoop.MouseButton1Click:Connect(function()
+            if ActiveLoopTPName == name then
+                stopAllWaypointActions()
+                renderWaypoints()
+            else
+                stopAllWaypointActions()
+                ActiveLoopTPName = name
+                ActiveLoopTPThread = task.spawn(function()
+                    while ActiveLoopTPName == name do
+                        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                            LocalPlayer.Character.HumanoidRootPart.CFrame = cf
+                        end
+                        task.wait(0.2)
+                    end
+                end)
+                renderWaypoints()
+            end
+        end)
+
         btnTween.MouseButton1Click:Connect(function()
+            stopAllWaypointActions()
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
                 local hrp = char.HumanoidRootPart
                 local dist = (hrp.Position - cf.Position).Magnitude
                 local time = dist / math.max(TweenSpeedVal, 1)
-                if CurrentTweenObj then CurrentTweenObj:Cancel() end
                 CurrentTweenObj = TweenService:Create(hrp, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = cf})
                 CurrentTweenObj:Play()
             end
         end)
 
         btnDel.MouseButton1Click:Connect(function()
+            if ActiveLoopTPName == name then stopAllWaypointActions() end
             Waypoints[name] = nil
             saveWaypointsToFile()
             renderWaypoints()
@@ -1203,7 +925,7 @@ local function renderWaypoints()
 end
 
 WPAddBtn.MouseButton1Click:Connect(function()
-    local name = WPInput.Text ~= "" and WPInput.Text or ("WP_" .. tostring(#WPListFrame:GetChildren()))
+    local name = WPInput.Text ~= "" and WPInput.Text or ("WP_" .. tostring(#WPListFrame:GetChildren() + 1))
     local char = LocalPlayer.Character
     if char and char:FindFirstChild("HumanoidRootPart") then
         Waypoints[name] = char.HumanoidRootPart.CFrame
@@ -1221,7 +943,26 @@ if readfile and isfile and isfile(WaypointFileName) then
     end)
 end
 
--- 7. TAB 4: PLAYER
+-- 6. TAB 3: PLAYER (WITH LIVE SEARCH & SAFE TELEPORT)
+local SearchFrame = Instance.new("Frame")
+SearchFrame.Size = UDim2.new(1, -5, 0, 26)
+SearchFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+SearchFrame.Parent = PlayerTab
+addCorner(SearchFrame, 4)
+addStroke(SearchFrame, Color3.fromRGB(22, 22, 30), 1)
+
+local SearchBox = Instance.new("TextBox")
+SearchBox.Size = UDim2.new(1, -10, 1, 0)
+SearchBox.Position = UDim2.new(0, 5, 0, 0)
+SearchBox.BackgroundTransparency = 1
+SearchBox.PlaceholderText = "🔍 Search Player Name..."
+SearchBox.Text = ""
+SearchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+SearchBox.Font = Enum.Font.SourceSans
+SearchBox.TextSize = 11
+SearchBox.TextXAlignment = Enum.TextXAlignment.Left
+SearchBox.Parent = SearchFrame
+
 local PlrListFrame = Instance.new("Frame")
 PlrListFrame.Size = UDim2.new(1, -5, 0, 95)
 PlrListFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -1254,48 +995,64 @@ TargetLbl.Parent = PlayerTab
 
 local function refreshPlayerList()
     for _, child in pairs(PlrScroll:GetChildren()) do if child:IsA("TextButton") then child:Destroy() end end
+    local query = string.lower(SearchBox.Text)
+
     for _, plr in pairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(1, 0, 0, 22)
-            btn.BackgroundColor3 = (SelectedPlayer == plr) and Color3.fromRGB(12, 35, 55) or Color3.fromRGB(8, 8, 12)
-            btn.Text = " " .. plr.DisplayName .. " (@" .. plr.Name .. ")"
-            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            btn.Font = Enum.Font.SourceSans
-            btn.TextSize = 11
-            btn.TextXAlignment = Enum.TextXAlignment.Left
-            btn.Parent = PlrScroll
-            addCorner(btn, 3)
+            local matchName = string.find(string.lower(plr.Name), query)
+            local matchDisplay = string.find(string.lower(plr.DisplayName), query)
 
-            btn.MouseButton1Click:Connect(function()
-                SelectedPlayer = plr
-                TargetLbl.Text = "Target: " .. plr.Name
-                refreshPlayerList()
-            end)
+            if query == "" or matchName or matchDisplay then
+                local btn = Instance.new("TextButton")
+                btn.Size = UDim2.new(1, 0, 0, 22)
+                btn.BackgroundColor3 = (SelectedPlayer == plr) and Color3.fromRGB(12, 35, 55) or Color3.fromRGB(8, 8, 12)
+                btn.Text = " " .. plr.DisplayName .. " (@" .. plr.Name .. ")"
+                btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                btn.Font = Enum.Font.SourceSans
+                btn.TextSize = 11
+                btn.TextXAlignment = Enum.TextXAlignment.Left
+                btn.Parent = PlrScroll
+                addCorner(btn, 3)
+
+                btn.MouseButton1Click:Connect(function()
+                    SelectedPlayer = plr
+                    TargetLbl.Text = "Target: " .. plr.Name
+                    refreshPlayerList()
+                end)
+            end
         end
     end
 end
 
+SearchBox:GetPropertyChangedSignal("Text"):Connect(refreshPlayerList)
+
 addActionButton(PlayerTab, "Refresh Player List", Color3.fromRGB(14, 14, 20), refreshPlayerList)
 
+-- SAFE TP TO PLAYER
 addActionButton(PlayerTab, "TP to Player", Color3.fromRGB(10, 45, 25), function()
-    if SelectedPlayer and SelectedPlayer.Character and SelectedPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            LocalPlayer.Character.HumanoidRootPart.CFrame = SelectedPlayer.Character.HumanoidRootPart.CFrame
+    if SelectedPlayer and SelectedPlayer.Character then
+        local targetHRP = SelectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local targetHum = SelectedPlayer.Character:FindFirstChildOfClass("Humanoid")
+        local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+        if targetHRP and targetHum and targetHum.Health > 0 and myHRP then
+            myHRP.CFrame = targetHRP.CFrame
         end
     end
 end)
 
+-- SAFE TWEEN TO PLAYER
 addActionButton(PlayerTab, "Tween to Player", Color3.fromRGB(50, 35, 10), function()
-    if SelectedPlayer and SelectedPlayer.Character and SelectedPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        local char = LocalPlayer.Character
-        if char and char:FindFirstChild("HumanoidRootPart") then
-            local hrp = char.HumanoidRootPart
-            local targetCF = SelectedPlayer.Character.HumanoidRootPart.CFrame
-            local dist = (hrp.Position - targetCF.Position).Magnitude
+    if SelectedPlayer and SelectedPlayer.Character then
+        local targetHRP = SelectedPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local targetHum = SelectedPlayer.Character:FindFirstChildOfClass("Humanoid")
+        local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+        if targetHRP and targetHum and targetHum.Health > 0 and myHRP then
+            local dist = (myHRP.Position - targetHRP.Position).Magnitude
             local time = dist / math.max(TweenSpeedVal, 1)
-            if CurrentTweenObj then CurrentTweenObj:Cancel() end
-            CurrentTweenObj = TweenService:Create(hrp, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = targetCF})
+            stopAllWaypointActions()
+            CurrentTweenObj = TweenService:Create(myHRP, TweenInfo.new(time, Enum.EasingStyle.Linear), {CFrame = targetHRP.CFrame})
             CurrentTweenObj:Play()
         end
     end
@@ -1339,13 +1096,9 @@ end)
 
 refreshPlayerList()
 
--- 8. TAB 5: VISUAL (DYNAMIC FULLBRIGHT, NOFOG & CHAMS ESP)
+-- 7. TAB 4: VISUAL (DYNAMIC FULLBRIGHT, NOFOG & CUSTOM MAXZOOM)
 local function getChamColor(plr)
-    if isTeammate(plr) then
-        return Color3.fromRGB(0, 255, 120)
-    else
-        return Color3.fromRGB(0, 229, 255)
-    end
+    if isTeammate(plr) then return Color3.fromRGB(0, 255, 120) else return Color3.fromRGB(0, 229, 255) end
 end
 
 local function applyChams(plr)
@@ -1377,14 +1130,9 @@ end
 local function setupPlayerListeners(plr)
     if plr == LocalPlayer then return end
     plr.CharacterAdded:Connect(function(char)
-        if ChamsEnabled then
-            task.wait(0.5)
-            applyChams(plr)
-        end
+        if ChamsEnabled then task.wait(0.5) applyChams(plr) end
     end)
-    if plr.Character then
-        applyChams(plr)
-    end
+    if plr.Character then applyChams(plr) end
 end
 
 for _, plr in pairs(Players:GetPlayers()) do setupPlayerListeners(plr) end
@@ -1394,9 +1142,7 @@ task.spawn(function()
     while true do
         if ChamsEnabled then
             for _, plr in pairs(Players:GetPlayers()) do
-                if plr ~= LocalPlayer and plr.Character then
-                    applyChams(plr)
-                end
+                if plr ~= LocalPlayer and plr.Character then applyChams(plr) end
             end
         end
         task.wait(1)
@@ -1406,7 +1152,6 @@ end)
 local function updateDistanceESP()
     for _, e in pairs(ESPLabels) do e:Destroy() end
     table.clear(ESPLabels)
-
     if not DistanceESPEnabled then return end
 
     for _, plr in pairs(Players:GetPlayers()) do
@@ -1455,14 +1200,11 @@ end
 
 addToggle(VisualTab, "Fullbright", false, function(state)
     FullbrightEnabled = state
-
     for _, conn in pairs(FullbrightConns) do conn:Disconnect() end
     table.clear(FullbrightConns)
 
     if FullbrightEnabled then
         applyFullbright()
-
-        -- Dynamic Listeners: Menolak perubahan lighting malam/gelap dari script game
         table.insert(FullbrightConns, game.Lighting:GetPropertyChangedSignal("Brightness"):Connect(applyFullbright))
         table.insert(FullbrightConns, game.Lighting:GetPropertyChangedSignal("Ambient"):Connect(applyFullbright))
         table.insert(FullbrightConns, game.Lighting:GetPropertyChangedSignal("OutdoorAmbient"):Connect(applyFullbright))
@@ -1479,31 +1221,28 @@ end)
 local function applyNoFog()
     if not NoFogEnabled then return end
     game.Lighting.FogEnd = 999999
-    for _, v in pairs(game.Lighting:GetDescendants()) do
-        if v:IsA("Atmosphere") then v.Density = 0 end
-    end
+    for _, v in pairs(game.Lighting:GetDescendants()) do if v:IsA("Atmosphere") then v.Density = 0 end end
 end
 
 addToggle(VisualTab, "NoFog", false, function(state)
     NoFogEnabled = state
-
     for _, conn in pairs(NoFogConns) do conn:Disconnect() end
     table.clear(NoFogConns)
 
     if NoFogEnabled then
         applyNoFog()
-
-        -- Dynamic Listeners: Jaga FogEnd dan matikan Atmosphere baru
         table.insert(NoFogConns, game.Lighting:GetPropertyChangedSignal("FogEnd"):Connect(applyNoFog))
-        table.insert(NoFogConns, game.Lighting.ChildAdded:Connect(function(child)
-            if child:IsA("Atmosphere") then child.Density = 0 end
-        end))
-        table.insert(NoFogConns, workspace.DescendantAdded:Connect(function(desc)
-            if NoFogEnabled and desc:IsA("Atmosphere") then desc.Density = 0 end
-        end))
+        table.insert(NoFogConns, game.Lighting.ChildAdded:Connect(function(child) if child:IsA("Atmosphere") then child.Density = 0 end end))
+        table.insert(NoFogConns, workspace.DescendantAdded:Connect(function(desc) if NoFogEnabled and desc:IsA("Atmosphere") then desc.Density = 0 end end))
     else
         game.Lighting.FogEnd = DefaultLighting.FogEnd
     end
+end)
+
+-- CUSTOM MAXZOOM VIA NUMPAD TEXTBOX
+addInputRow(VisualTab, "Custom MaxZoom", CustomMaxZoomVal, function(v)
+    CustomMaxZoomVal = v
+    LocalPlayer.CameraMaxZoomDistance = v
 end)
 
 addActionButton(VisualTab, "FPS Booster (Low Graphics)", Color3.fromRGB(12, 35, 55), function()
@@ -1529,11 +1268,6 @@ addToggle(VisualTab, "Freecam", false, function(state)
     end
 end)
 
-addToggle(VisualTab, "Unlock MaxZoom", false, function(state)
-    MaxZoomEnabled = state
-    LocalPlayer.CameraMaxZoomDistance = state and 99999 or 128
-end)
-
 addToggle(VisualTab, "Noclip Cam", false, function(state)
     NoclipCamEnabled = state
     LocalPlayer.DevCameraOcclusionMode = state and Enum.DevCameraOcclusionMode.Invisicam or Enum.DevCameraOcclusionMode.Zoom
@@ -1551,80 +1285,24 @@ Connections.ESPUpdateLoop = RunService.RenderStepped:Connect(function()
     end
 end)
 
--- 9. TAB 6: UTILITY & DEV TOOLS
-addToggle(UtilTab, "Anti Gameplay Pause", false, function(state)
+-- 8. TAB 5: UTILITY & RAPIH DATA
+addToggle(UtilTab, "Anti Gameplay Pause", true, function(state)
     AntiGameplayPauseEnabled = state
     pcall(function() GuiService:SetGameplayPausedNotificationEnabled(not state) end)
 end)
 
-addToggle(UtilTab, "Anti-Knockback", false, function(state) AntiKnockbackEnabled = state end)
-addToggle(UtilTab, "Anti-Ragdoll", false, function(state) AntiRagdollEnabled = state end)
-
-Connections.AntiKnockbackLoop = RunService.Heartbeat:Connect(function()
-    if AntiKnockbackEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-        local hrp = LocalPlayer.Character.HumanoidRootPart
-        if hrp.AssemblyLinearVelocity.Magnitude > 100 then
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.AssemblyAngularVelocity = Vector3.zero
-        end
-    end
-end)
-
-Connections.AntiRagdollLoop = RunService.Stepped:Connect(function()
-    if AntiRagdollEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
-        local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        local state = hum:GetState()
-        if state == Enum.HumanoidStateType.Ragdoll or state == Enum.HumanoidStateType.FallingDown then
-            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-        end
-    end
-end)
-
-addInputRow(UtilTab, "Prompt Trigger Radius", PromptRadiusVal, function(v) PromptRadiusVal = v end)
-addToggle(UtilTab, "Auto-Trigger Prompt", false, function(state) AutoPromptEnabled = state end)
-
-task.spawn(function()
-    while true do
-        if AutoPromptEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            local hrp = LocalPlayer.Character.HumanoidRootPart
-            for _, prompt in pairs(workspace:GetDescendants()) do
-                if prompt:IsA("ProximityPrompt") and prompt.Parent and prompt.Parent:IsA("BasePart") then
-                    local dist = (hrp.Position - prompt.Parent.Position).Magnitude
-                    if dist <= PromptRadiusVal and fireproximityprompt then
-                        fireproximityprompt(prompt)
-                    end
-                end
-            end
-        end
-        task.wait(0.2)
-    end
-end)
-
--- DYNAMIC INSTANT PROXIMITY PROMPT ENGINE
 local function applyInstantPrompt(prompt)
-    if prompt:IsA("ProximityPrompt") then
-        prompt.HoldDuration = 0
-    end
+    if prompt:IsA("ProximityPrompt") then prompt.HoldDuration = 0 end
 end
 
 addToggle(UtilTab, "Instant Proximity Prompt", false, function(state)
     InstantPromptEnabled = state
-
-    if InstantPromptConn then
-        InstantPromptConn:Disconnect()
-        InstantPromptConn = nil
-    end
+    if InstantPromptConn then InstantPromptConn:Disconnect() InstantPromptConn = nil end
 
     if state then
-        -- 1. Terapkan ke prompt yang sudah ada
-        for _, desc in pairs(workspace:GetDescendants()) do
-            applyInstantPrompt(desc)
-        end
-        -- 2. Dynamic Listener: Terapkan otomatis ke prompt baru yang di-load
+        for _, desc in pairs(workspace:GetDescendants()) do applyInstantPrompt(desc) end
         InstantPromptConn = workspace.DescendantAdded:Connect(function(desc)
-            if InstantPromptEnabled then
-                applyInstantPrompt(desc)
-            end
+            if InstantPromptEnabled then applyInstantPrompt(desc) end
         end)
     end
 end)
@@ -1640,37 +1318,18 @@ Connections.AntiAFKLoop = LocalPlayer.Idled:Connect(function()
 end)
 
 addActionButton(UtilTab, "Launch MoonDex", Color3.fromRGB(25, 20, 45), function()
-    pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/infyiff/backup/main/dex.lua"))()
-    end)
+    pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/infyiff/backup/main/dex.lua"))() end)
 end)
 
 addActionButton(UtilTab, "Launch Cobalt RSpy", Color3.fromRGB(12, 30, 50), function()
-    pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/GOTROBLOX/Cobalt/main/Cobalt.lua"))()
-    end)
+    pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/GOTROBLOX/Cobalt/main/Cobalt.lua"))() end)
 end)
 
-addActionButton(UtilTab, "Smallest Server Hop", Color3.fromRGB(12, 35, 55), function()
-    pcall(function()
-        local http = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
-        for _, server in pairs(http.data) do
-            if server.playing < server.maxPlayers and server.id ~= game.JobId then
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LocalPlayer)
-                break
-            end
-        end
-    end)
-end)
-
-addActionButton(UtilTab, "Server Hop", Color3.fromRGB(20, 25, 40), function()
-    TeleportService:Teleport(game.PlaceId, LocalPlayer)
-end)
-
-addActionButton(UtilTab, "Rejoin", Color3.fromRGB(40, 25, 50), function()
+addActionButton(UtilTab, "Rejoin Server", Color3.fromRGB(40, 25, 50), function()
     TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
 end)
 
+-- FIXED SAVE CONFIG TO FOLDER 'FEUtilityData/'
 addActionButton(UtilTab, "Save Config Per-Game", Color3.fromRGB(10, 45, 25), function()
     if writefile then
         local cfg = {
@@ -1679,22 +1338,13 @@ addActionButton(UtilTab, "Save Config Per-Game", Color3.fromRGB(10, 45, 25), fun
             JumpPowerVal = JumpPowerVal,
             HipHeightVal = HipHeightVal,
             GravityVal = GravityVal,
-            KillAuraRadius = KillAuraRadius,
-            KillAuraDelay = KillAuraDelay,
-            KillAuraTargetMode = KillAuraTargetMode,
-            WeaponReachSize = WeaponReachSize,
-            PromptRadiusVal = PromptRadiusVal,
-            FOVRadiusVal = FOVRadiusVal,
-            SmoothnessVal = SmoothnessVal,
-            PredictionScaleVal = PredictionScaleVal,
-            IgnoreTeams = IgnoreTeams,
-            WallCheck = WallCheck
+            CustomMaxZoomVal = CustomMaxZoomVal
         }
         pcall(function() writefile(ConfigFileName, HttpService:JSONEncode(cfg)) end)
     end
 end)
 
--- Auto-Load Config Per-Game
+-- AUTO LOAD CONFIG
 if readfile and isfile and isfile(ConfigFileName) then
     pcall(function()
         local cfg = HttpService:JSONDecode(readfile(ConfigFileName))
@@ -1703,16 +1353,10 @@ if readfile and isfile and isfile(ConfigFileName) then
         if cfg.JumpPowerVal then JumpPowerVal = cfg.JumpPowerVal end
         if cfg.HipHeightVal then HipHeightVal = cfg.HipHeightVal end
         if cfg.GravityVal then GravityVal = cfg.GravityVal end
-        if cfg.KillAuraRadius then KillAuraRadius = cfg.KillAuraRadius end
-        if cfg.KillAuraDelay then KillAuraDelay = cfg.KillAuraDelay end
-        if cfg.KillAuraTargetMode then KillAuraTargetMode = cfg.KillAuraTargetMode end
-        if cfg.WeaponReachSize then WeaponReachSize = cfg.WeaponReachSize end
-        if cfg.PromptRadiusVal then PromptRadiusVal = cfg.PromptRadiusVal end
-        if cfg.FOVRadiusVal then FOVRadiusVal = cfg.FOVRadiusVal end
-        if cfg.SmoothnessVal then SmoothnessVal = cfg.SmoothnessVal end
-        if cfg.PredictionScaleVal then PredictionScaleVal = cfg.PredictionScaleVal end
-        if cfg.IgnoreTeams ~= nil then IgnoreTeams = cfg.IgnoreTeams end
-        if cfg.WallCheck ~= nil then WallCheck = cfg.WallCheck end
+        if cfg.CustomMaxZoomVal then
+            CustomMaxZoomVal = cfg.CustomMaxZoomVal
+            LocalPlayer.CameraMaxZoomDistance = CustomMaxZoomVal
+        end
     end)
 end
 
@@ -1720,16 +1364,13 @@ addActionButton(UtilTab, "UNLOAD SCRIPT", Color3.fromRGB(60, 15, 15), function()
     if _G.FEUtilityCleanup then _G.FEUtilityCleanup() end
 end)
 
--- 10. TOGGLE & CLEANUP BINDINGS
+-- 9. TOGGLE & CLEANUP BINDINGS
 CloseBtn.MouseButton1Click:Connect(function() MainFrame.Visible = false end)
 ToggleBtn.MouseButton1Click:Connect(function() MainFrame.Visible = not MainFrame.Visible end)
 
 _G.FEUtilityCleanup = function()
-    AimbotEnabled = false
-    KillAuraEnabled = false
     TPWalkEnabled = false
     WallTPEnabled = false
-    AutoPromptEnabled = false
     ChamsEnabled = false
     FlyEnabled = false
     FullbrightEnabled = false
@@ -1739,29 +1380,19 @@ _G.FEUtilityCleanup = function()
     stopFly()
     disableWallTP()
     removeChams()
+    stopAllWaypointActions()
 
-    if InstantPromptConn then
-        InstantPromptConn:Disconnect()
-        InstantPromptConn = nil
-    end
-
+    if InstantPromptConn then InstantPromptConn:Disconnect() InstantPromptConn = nil end
     for _, conn in pairs(FullbrightConns) do conn:Disconnect() end
     for _, conn in pairs(NoFogConns) do conn:Disconnect() end
     table.clear(FullbrightConns)
     table.clear(NoFogConns)
-
-    if FOVCircle then
-        pcall(function() FOVCircle:Remove() end)
-    end
 
     for _, conn in pairs(Connections) do
         if conn and conn.Connected then conn:Disconnect() end
     end
 
     for _, e in pairs(ESPLabels) do e:Destroy() end
-
-    if FloatBV then FloatBV:Destroy() end
-    if FloatBG then FloatBG:Destroy() end
     if AirwalkPart then AirwalkPart:Destroy() end
 
     pcall(function() GuiService:SetGameplayPausedNotificationEnabled(true) end)
