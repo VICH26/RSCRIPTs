@@ -1,6 +1,6 @@
 --[[
     =======================================================
-    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - ULTRA COMPUTE)
+    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - FIXED LOAD ERROR)
     Style: True Black Minimalist / AMOLED Clean UX
     Features: Move, Waypoint (Pathfinding, Forced TPWalk, Loop TP 0.2s),
               Player (Live Search & Safe TP), Visual (Dynamic Fullbright,
@@ -346,8 +346,8 @@ local function createTab(name)
         for tName, tFrame in pairs(Tabs) do
             local isTarget = (tName == name)
             tFrame.Visible = isTarget
-            TabButtons[tName].BackgroundColor3 = isTarget and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(10, 10, 14)
-            TabButtons[tName].TextColor3 = isTarget and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(150, 150, 160)
+            TabButtons[tName].BackgroundColor3 = isTarget and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(10, 10, 14)
+            TabButtons[tName].TextColor3 = isTarget and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(150, 150, 160)
         end
     end)
 
@@ -364,7 +364,7 @@ Tabs["Move"].Visible = true
 TabButtons["Move"].BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 TabButtons["Move"].TextColor3 = Color3.fromRGB(0, 229, 255)
 
--- 3. UI CONTROLS HELPERS (FORCED MOBILE NUMPAD KEYBOARD)
+-- 3. UI CONTROLS HELPERS (SAFE NUMERIC INPUT FILTER)
 local function addInputRow(parent, labelText, defaultValue, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -5, 0, 28)
@@ -392,9 +392,12 @@ local function addInputRow(parent, labelText, defaultValue, callback)
     box.TextColor3 = Color3.fromRGB(255, 255, 255)
     box.Font = Enum.Font.SourceSans
     box.TextSize = 11
-    box.KeyboardType = Enum.KeyboardType.DecimalPad
     box.Parent = frame
     addCorner(box, 3)
+
+    pcall(function()
+        box.KeyboardType = Enum.KeyboardType.DecimalPad
+    end)
 
     box:GetPropertyChangedSignal("Text"):Connect(function()
         box.Text = string.gsub(box.Text, "[^%d%.]", "")
@@ -471,7 +474,7 @@ local function addActionButton(parent, labelText, color, callback)
     return btn
 end
 
--- 4. TAB 1: MOVEMENT & SERVER DATA FETCH (2-DECIMAL FIXED DISPLAY)
+-- 4. TAB 1: MOVEMENT & SERVER DATA FETCH
 local ServerInfoLbl = Instance.new("TextLabel")
 ServerInfoLbl.Size = UDim2.new(1, -5, 0, 22)
 ServerInfoLbl.BackgroundTransparency = 1
@@ -1031,13 +1034,14 @@ WPAddBtn.MouseButton1Click:Connect(function()
     end
 end)
 
+-- Initial Load Waypoints
 if readfile and isfile and isfile(WaypointFileName) then
     pcall(function()
         local decoded = HttpService:JSONDecode(readfile(WaypointFileName))
         for name, cfTable in pairs(decoded) do Waypoints[name] = CFrame.new(unpack(cfTable)) end
-        renderWaypoints()
     end)
 end
+renderWaypoints()
 
 -- 6. TAB 3: PLAYER (WITH LIVE SEARCH & SAFE TELEPORT)
 local SearchFrame = Instance.new("Frame")
