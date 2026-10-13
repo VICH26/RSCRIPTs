@@ -1,12 +1,11 @@
 --[[
     =======================================================
-    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - FINAL PATHFINDING)
+    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - REWORKED FINAL)
     Style: True Black Minimalist / AMOLED Clean UX
-    Features: Move (Fetch Server Data, Locked Airwalk),
-              Waypoint (Pathfinding WalkTo, Loop TP 0.2s, Cancel All),
-              Player (Search Filter, Safe TP/Tween),
-              Visual (Dynamic Fullbright, NoFog, Custom MaxZoom),
-              Util (Auto Anti-Pause, Folder Storage 'FEUtilityData/')
+    Features: Move, Waypoint (Continuous WalkTo & Loop TP 0.2s),
+              Player (Search & Safe TP), Visual (Dynamic Fullbright, NoFog, Custom MaxZoom),
+              Util (Anti Gameplay Pause, Instant Prompts, Save Config).
+              Penyimpanan Rapi di Folder 'FEUtilityData/'
     =======================================================
 --]]
 
@@ -22,7 +21,6 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
-local PathfindingService = game:GetService("PathfindingService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -98,6 +96,7 @@ local FreecamCamType = Camera.CameraType
 
 local Waypoints = {}
 local ActiveWalkToThread = nil
+local ActiveWalkToName = nil
 local ActiveLoopTPThread = nil
 local ActiveLoopTPName = nil
 
@@ -696,7 +695,6 @@ Connections.VehicleBoostLoop = RunService.Heartbeat:Connect(function()
     end
 end)
 
--- FIXED AIRWALK ENGINE (KUNCI ELEVASI Y)
 Connections.AirwalkLoop = RunService.RenderStepped:Connect(function()
     if AirwalkEnabled and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         local hrp = LocalPlayer.Character.HumanoidRootPart
@@ -730,7 +728,7 @@ Connections.InfJumpLoop = UserInputService.JumpRequest:Connect(function()
     end
 end)
 
--- 5. TAB 2: WAYPOINT (PATHFINDING WALKTO & LOOP TP 0.2S)
+-- 5. TAB 2: WAYPOINT (CONTINUOUS RE-TRIGGER WALKTO & LOOP TP 0.2S)
 local WPCreateFrame = Instance.new("Frame")
 WPCreateFrame.Size = UDim2.new(1, -5, 0, 28)
 WPCreateFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
@@ -760,16 +758,22 @@ WPAddBtn.TextSize = 11
 WPAddBtn.Parent = WPCreateFrame
 addCorner(WPAddBtn, 3)
 
+local renderWaypoints
+
 local function stopAllWaypointActions()
     if CurrentTweenObj then CurrentTweenObj:Cancel() CurrentTweenObj = nil end
-    if ActiveWalkToThread then task.cancel(ActiveWalkToThread) ActiveWalkToThread = nil end
+    if ActiveWalkToThread then task.cancel(ActiveWalkToThread) ActiveWalkToThread = nil ActiveWalkToName = nil end
     if ActiveLoopTPThread then task.cancel(ActiveLoopTPThread) ActiveLoopTPThread = nil ActiveLoopTPName = nil end
     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         LocalPlayer.Character:FindFirstChildOfClass("Humanoid"):MoveTo(LocalPlayer.Character.HumanoidRootPart.Position)
     end
 end
 
-addActionButton(WPTab, "Cancel All Active Actions (Tween/WalkTo/Loop)", Color3.fromRGB(60, 20, 20), stopAllWaypointActions)
+addActionButton(WPTab, "Cancel All Active Actions", Color3.fromRGB(60, 20, 20), function()
+    stopAllWaypointActions()
+    if renderWaypoints then renderWaypoints() end
+end)
+
 addInputRow(WPTab, "Tween Speed", TweenSpeedVal, function(v) TweenSpeedVal = v end)
 
 local WPListFrame = Instance.new("Frame")
@@ -791,7 +795,7 @@ local function saveWaypointsToFile()
     end
 end
 
-local function renderWaypoints()
+renderWaypoints = function()
     for _, child in pairs(WPListFrame:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
     for name, cf in pairs(Waypoints) do
         local card = Instance.new("Frame")
@@ -826,9 +830,9 @@ local function renderWaypoints()
         local btnWalk = Instance.new("TextButton")
         btnWalk.Size = UDim2.new(0.16, 0, 0.8, 0)
         btnWalk.Position = UDim2.new(0.38, 0, 0.1, 0)
-        btnWalk.BackgroundColor3 = Color3.fromRGB(15, 35, 55)
+        btnWalk.BackgroundColor3 = (ActiveWalkToName == name) and Color3.fromRGB(0, 229, 255) or Color3.fromRGB(15, 35, 55)
         btnWalk.Text = "WalkTo"
-        btnWalk.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btnWalk.TextColor3 = (ActiveWalkToName == name) and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
         btnWalk.Font = Enum.Font.SourceSansBold
         btnWalk.TextSize = 9
         btnWalk.Parent = card
@@ -873,40 +877,34 @@ local function renderWaypoints()
             end
         end)
 
-        -- SMART PATHFINDING WALKTO ENGINE
+        -- CONTINUOUS RE-TRIGGER WALKTO (ANTI 8-SECOND TIMEOUT & AUTO-STOP <= 3 STUDS)
         btnWalk.MouseButton1Click:Connect(function()
-            stopAllWaypointActions()
-            ActiveWalkToThread = task.spawn(function()
-                local char = LocalPlayer.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if ActiveWalkToName == name then
+                stopAllWaypointActions()
+                renderWaypoints()
+            else
+                stopAllWaypointActions()
+                ActiveWalkToName = name
+                ActiveWalkToThread = task.spawn(function()
+                    while ActiveWalkToName == name do
+                        local char = LocalPlayer.Character
+                        local hum = char and char:FindFirstChildOfClass("Humanoid")
+                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-                if hum and hrp then
-                    local path = PathfindingService:CreatePath({
-                        AgentRadius = 2,
-                        AgentHeight = 5,
-                        AgentCanJump = true
-                    })
-
-                    local success = pcall(function()
-                        path:ComputeAsync(hrp.Position, cf.Position)
-                    end)
-
-                    if success and path.Status == Enum.PathStatus.Success then
-                        local waypoints = path:GetWaypoints()
-                        for _, waypoint in ipairs(waypoints) do
-                            if waypoint.Action == Enum.PathWaypointAction.Jump then
-                                hum.Jump = true
+                        if hum and hrp then
+                            local dist = (hrp.Position - cf.Position).Magnitude
+                            if dist <= 3 then
+                                stopAllWaypointActions()
+                                renderWaypoints()
+                                break
                             end
-                            hum:MoveTo(waypoint.Position)
-                            local moveFinished = hum.MoveToFinished:Wait()
-                            if not moveFinished then break end
+                            hum:MoveTo(cf.Position)
                         end
-                    else
-                        hum:MoveTo(cf.Position)
+                        task.wait(0.3)
                     end
-                end
-            end)
+                end)
+                renderWaypoints()
+            end
         end)
 
         btnLoop.MouseButton1Click:Connect(function()
@@ -941,7 +939,7 @@ local function renderWaypoints()
         end)
 
         btnDel.MouseButton1Click:Connect(function()
-            if ActiveLoopTPName == name then stopAllWaypointActions() end
+            if ActiveLoopTPName == name or ActiveWalkToName == name then stopAllWaypointActions() end
             Waypoints[name] = nil
             saveWaypointsToFile()
             renderWaypoints()
@@ -1053,6 +1051,7 @@ SearchBox:GetPropertyChangedSignal("Text"):Connect(refreshPlayerList)
 
 addActionButton(PlayerTab, "Refresh Player List", Color3.fromRGB(14, 14, 20), refreshPlayerList)
 
+-- SAFE TP TO PLAYER
 addActionButton(PlayerTab, "TP to Player", Color3.fromRGB(10, 45, 25), function()
     if SelectedPlayer and SelectedPlayer.Character then
         local targetHRP = SelectedPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -1065,6 +1064,7 @@ addActionButton(PlayerTab, "TP to Player", Color3.fromRGB(10, 45, 25), function(
     end
 end)
 
+-- SAFE TWEEN TO PLAYER
 addActionButton(PlayerTab, "Tween to Player", Color3.fromRGB(50, 35, 10), function()
     if SelectedPlayer and SelectedPlayer.Character then
         local targetHRP = SelectedPlayer.Character:FindFirstChild("HumanoidRootPart")
