@@ -1,6 +1,6 @@
 --[[
     =======================================================
-    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - FIXED LOAD ERROR)
+    CUSTOM FE UTILITY GUI (MOBILE FRIENDLY - STANDARD INPUT)
     Style: True Black Minimalist / AMOLED Clean UX
     Features: Move, Waypoint (Pathfinding, Forced TPWalk, Loop TP 0.2s),
               Player (Live Search & Safe TP), Visual (Dynamic Fullbright,
@@ -364,7 +364,7 @@ Tabs["Move"].Visible = true
 TabButtons["Move"].BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 TabButtons["Move"].TextColor3 = Color3.fromRGB(0, 229, 255)
 
--- 3. UI CONTROLS HELPERS (SAFE NUMERIC INPUT FILTER)
+-- 3. UI CONTROLS HELPERS (STANDARD INPUT WITH NUMERIC FILTER)
 local function addInputRow(parent, labelText, defaultValue, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -5, 0, 28)
@@ -394,10 +394,6 @@ local function addInputRow(parent, labelText, defaultValue, callback)
     box.TextSize = 11
     box.Parent = frame
     addCorner(box, 3)
-
-    pcall(function()
-        box.KeyboardType = Enum.KeyboardType.DecimalPad
-    end)
 
     box:GetPropertyChangedSignal("Text"):Connect(function()
         box.Text = string.gsub(box.Text, "[^%d%.]", "")
@@ -1339,7 +1335,7 @@ addToggle(VisualTab, "NoFog", false, function(state)
     end
 end)
 
--- CUSTOM MAXZOOM VIA NUMPAD TEXTBOX
+-- CUSTOM MAXZOOM VIA STANDARD TEXTBOX
 addInputRow(VisualTab, "Custom MaxZoom", CustomMaxZoomVal, function(v)
     CustomMaxZoomVal = v
     LocalPlayer.CameraMaxZoomDistance = v
